@@ -41,6 +41,7 @@ bsim_bt_out
 scripts/grub
 doc/reference/kconfig/*.rst
 doc/doc.warnings
+share/zephyr-package/cmake/current_path.txt
 .*project
 .settings
 .envrc
