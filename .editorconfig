@@ -14,22 +14,22 @@ max_line_length = 100
 # Assembly
 [*.S]
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # C
 [*.{c,h}]
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # C++
 [*.{cpp,hpp}]
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # Linker Script
 [*.ld]
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # Python
 [*.py]
@@ -39,7 +39,7 @@ indent_size = 4
 # Perl
 [*.pl]
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # reStructuredText
 [*.rst]
@@ -60,7 +60,7 @@ indent_size = 4
 [*.cmd]
 end_of_line = crlf
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # Valgrind Suppression File
 [*.supp]
@@ -75,12 +75,12 @@ indent_size = 2
 # Makefile
 [Makefile]
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # Device tree
 [*.{dts,dtsi,overlay}]
 indent_style = tab
-indent_size = 8
+indent_size = 4
 
 # Git commit messages
 [COMMIT_EDITMSG]
@@ -89,4 +89,4 @@ max_line_length = 75
 # Kconfig
 [Kconfig*]
 indent_style = tab
-indent_size = 8
+indent_size = 4
