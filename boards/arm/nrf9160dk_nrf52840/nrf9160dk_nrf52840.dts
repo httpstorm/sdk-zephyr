@@ -119,13 +119,13 @@
 		nrf_interface_pins_0_2_routing: switch-nrf-if0-2-ctrl {
 			compatible = "nordic,nrf9160dk-optional-routing";
 			control-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
-			status = "disabled";
+			status = "okay";
 		};
 
 		nrf_interface_pins_3_5_routing: switch-nrf-if3-5-ctrl {
 			compatible = "nordic,nrf9160dk-optional-routing";
 			control-gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
-			status = "disabled";
+			status = "okay";
 		};
 
 		nrf_interface_pins_6_8_routing: switch-nrf-if6-8-ctrl {
@@ -163,6 +163,19 @@
 	pinctrl-0 = <&uart0_default>;
 	pinctrl-1 = <&uart0_sleep>;
 	pinctrl-names = "default", "sleep";
+};
+
+&uart1 {
+	compatible = "nordic,nrf-uarte";
+	current-speed = <115200>;
+	status = "okay";
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-1 = <&uart1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+zephyr_udc0: &usbd {
+	status = "okay";
 };
 
 &flash0 {

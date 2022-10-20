@@ -1,0 +1,849 @@
+/*
+ * Copyright (c) 2018 Bosch Sensortec GmbH
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr.h>
+#include <device.h>
+#include <drivers/sensor.h>
+#include <stdio.h>
+
+#define OK 0
+#define FAIL -1
+
+static int so = FAIL;
+
+
+#if CONFIG_NETWORKING
+#include <string.h>
+#include <nrf_socket.h>
+#include <net/socket.h>
+#include <devicetree.h>
+#include <drivers/gpio.h>
+#include <modem/at_cmd.h>
+#include <modem/at_notif.h>
+
+ // LTE modem
+#include <modem/bsdlib.h>
+#include <modem/lte_lc.h>
+#include <modem/modem_info.h>
+
+
+// LED
+#define LED_R_NODE DT_ALIAS(led0)
+#define LED_G_NODE DT_ALIAS(led1)
+#define LED_B_NODE DT_ALIAS(led2)
+#define LED_SR_NODE DT_ALIAS(sense_led0)
+#define LED_SG_NODE DT_ALIAS(sense_led1)
+#define LED_SB_NODE DT_ALIAS(sense_led2)
+
+#if DT_NODE_HAS_STATUS(LED_R_NODE, okay)
+#define LED_R	  DT_GPIO_LABEL(LED_R_NODE, gpios)
+#define LED_G	  DT_GPIO_LABEL(LED_G_NODE, gpios)
+#define LED_B	  DT_GPIO_LABEL(LED_B_NODE, gpios)
+#define LED_SR	  DT_GPIO_LABEL(LED_SR_NODE, gpios)
+#define LED_SG	  DT_GPIO_LABEL(LED_SG_NODE, gpios)
+#define LED_SB	  DT_GPIO_LABEL(LED_SB_NODE, gpios)
+#define PIN_R	  DT_GPIO_PIN(LED_R_NODE, gpios)
+#define PIN_G	  DT_GPIO_PIN(LED_G_NODE, gpios)
+#define PIN_B	  DT_GPIO_PIN(LED_B_NODE, gpios)
+#define PIN_SR	  DT_GPIO_PIN(LED_SR_NODE, gpios)
+#define PIN_SG	  DT_GPIO_PIN(LED_SG_NODE, gpios)
+#define PIN_SB	  DT_GPIO_PIN(LED_SB_NODE, gpios)
+#define FLAGS_R	  DT_GPIO_FLAGS(LED_R_NODE, gpios)
+#define FLAGS_G	  DT_GPIO_FLAGS(LED_G_NODE, gpios)
+#define FLAGS_B	  DT_GPIO_FLAGS(LED_B_NODE, gpios)
+#define FLAGS_SR  DT_GPIO_FLAGS(LED_SR_NODE, gpios)
+#define FLAGS_SG  DT_GPIO_FLAGS(LED_SG_NODE, gpios)
+#define FLAGS_SB  DT_GPIO_FLAGS(LED_SB_NODE, gpios)
+
+const char * led_names[] = { LED_R, LED_G, LED_B, LED_SR, LED_SG, LED_SB };
+gpio_pin_t led_pins[] = { PIN_R, PIN_G, PIN_B, PIN_SR, PIN_SG, PIN_SB };
+gpio_flags_t led_flags[] = { FLAGS_R, FLAGS_G, FLAGS_B, FLAGS_SR, FLAGS_SG, FLAGS_SB };
+
+#define LED_COUNT (sizeof(led_names) / sizeof(*led_names))
+#define LED_COUNT_PINS (sizeof(led_pins) / sizeof(*led_pins))
+#define LED_COUNT_FLAGS (sizeof(led_flags) / sizeof(*led_flags))
+#else
+#error "Unsupported board: led0 devicetree alias is not defined"
+#endif
+
+struct LED_obj_t
+{
+	const struct device * dev;
+	gpio_pin_t pin;
+};
+
+struct LED_t
+{
+	struct LED_obj_t r;
+	struct LED_obj_t g;
+	struct LED_obj_t b;
+};
+
+struct LEDS_t
+{
+	union
+	{
+		struct
+		{
+			struct LED_t main;
+			struct LED_t sense;
+		};
+
+		struct LED_obj_t list[LED_COUNT];
+	};
+};
+
+static struct LEDS_t led;
+
+int led_init(void)
+{
+	int b = OK;
+	size_t i = 0;
+
+	memset(&led, 0, sizeof(led));
+
+	if ((LED_COUNT != LED_COUNT_PINS) || (LED_COUNT != LED_COUNT_FLAGS))
+	{
+		printk("led_init()  led_names, led_nodes, and led_flags should have the same length\n");
+		return FAIL;
+	}
+
+	for (i = 0; i < LED_COUNT; i++)
+	{
+		led.list[i].dev = device_get_binding(led_names[i]);
+		led.list[i].pin = led_pins[i];
+
+		if (
+			!led.list[i].dev ||
+			(gpio_pin_configure(led.list[i].dev, led.list[i].pin, led_flags[i] | GPIO_OUTPUT_INACTIVE) < 0)
+			)
+		{
+			led.list[i].dev = NULL;
+			b = FAIL;
+		}
+	}
+
+	return b;
+}
+
+int led_set(struct LED_obj_t led, int on)
+{
+	if (!led.dev)
+	{
+		return FAIL;
+	}
+
+	return gpio_pin_set(led.dev, led.pin, on);
+}
+
+int led_set_rgb(struct LED_t * led, int r, int g, int b)
+{
+	int err = 0;
+	err |= led_set(led->r, r);
+	err |= led_set(led->g, g);
+	err |= led_set(led->b, b);
+
+	return err;
+}
+
+
+// BUTTONS
+#define BTN_0_NODE DT_ALIAS(sw0)
+
+#if DT_NODE_HAS_STATUS(BTN_0_NODE, okay)
+#define BTN_0		DT_GPIO_LABEL(BTN_0_NODE, gpios)
+#define BTN_0_PIN	DT_GPIO_PIN(BTN_0_NODE, gpios)
+#define BTN_0_FLAGS	DT_GPIO_FLAGS(BTN_0_NODE, gpios)
+#else
+#error "Unsupported board: sw0 devicetree alias is not defined"
+#endif
+
+K_SEM_DEFINE(sem_tcp_connect, 0, 1);
+
+struct BTN_obj_t
+{
+	const struct device * dev;
+	gpio_pin_t pin;
+};
+
+static struct gpio_callback btn_0_cb_data;
+static struct BTN_obj_t btn_0;
+static int btn_0_trigger;
+
+void btn_0_pressed(const struct device * dev, struct gpio_callback * cb, uint32_t pins)
+{
+	btn_0_trigger = 1;
+	led_set_rgb(&led.sense, 0, 1, 0);
+	k_sem_give(&sem_tcp_connect);
+}
+
+int btn_init(void)
+{
+	int b = OK;
+
+	btn_0.dev = device_get_binding(BTN_0);
+	btn_0.pin = BTN_0_PIN;
+
+	if (
+		!btn_0.dev ||
+		(OK != gpio_pin_configure(btn_0.dev, btn_0.pin, BTN_0_FLAGS | GPIO_INPUT)) ||
+		(OK != gpio_pin_interrupt_configure(btn_0.dev, btn_0.pin, GPIO_INT_EDGE_TO_ACTIVE))
+		)
+	{
+		btn_0.dev = NULL;
+		b = FAIL;
+	}
+	else
+	{
+		gpio_init_callback(&btn_0_cb_data, btn_0_pressed, BIT(btn_0.pin));
+		gpio_add_callback(btn_0.dev, &btn_0_cb_data);
+	}
+
+	return OK;
+}
+
+int btn_get(struct BTN_obj_t btn)
+{
+	if (!btn.dev)
+	{
+		return 0;
+	}
+
+	return gpio_pin_get(btn.dev, btn.pin);
+}
+
+
+#define CONFIG_TCP_SERVER_ADDRESS_STATIC "87.118.177.198"
+#define CONFIG_TCP_SERVER_PORT 81
+static struct modem_param_info modem_param;
+static struct sockaddr_storage host_addr;
+static int lte_enabled = 0;
+static int lte_ready = 0;
+
+
+// connect to TCP server
+int tcp_connect(void)
+{
+	led_set_rgb(&led.main, 0, 0, 1);
+	printk("connecting %s:%u\n\n", CONFIG_TCP_SERVER_ADDRESS_STATIC, CONFIG_TCP_SERVER_PORT);
+
+	// server address init
+	struct sockaddr_in * server4 = ((struct sockaddr_in *)&host_addr);
+
+	server4->sin_family = AF_INET;
+	server4->sin_port = htons(CONFIG_TCP_SERVER_PORT);
+
+	inet_pton(AF_INET, CONFIG_TCP_SERVER_ADDRESS_STATIC, &server4->sin_addr);
+
+	// server connect
+	int so = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+	if (so < 0)
+	{
+		led_set_rgb(&led.main, 1, 0, 1);
+		printk("\n\tcannot create TCP socket  %u %s\n\n", errno, strerror(errno));
+
+		return FAIL;
+	}
+
+	led_set_rgb(&led.main, 0, 1, 1);
+
+	int err = connect(so, (struct sockaddr *)&host_addr, sizeof(struct sockaddr_in));
+
+	if (err < 0)
+	{
+		close(so);
+		led_set_rgb(&led.main, 1, 0, 0);
+		printk("\n\tFAILED  %u %s\n\n", errno, strerror(errno));
+
+		return FAIL;
+	}
+
+	led_set_rgb(&led.main, 0, 1, 0);
+	printk("connected\n\n");
+
+	return so;
+}
+
+int init_lte(void)
+{
+	// init LTE
+	led_set_rgb(&led.sense, 0, 0, 1);
+	printk("LTE modem starting...\n\n");
+	int b = lte_lc_init_and_connect();
+
+	if (b != OK)
+	{
+		led_set_rgb(&led.sense, 1, 0, 0);
+		printk("FAILED %u\n\n", -b);
+		return FAIL;
+	}
+
+	led_set_rgb(&led.sense, 0, 1, 1);
+	printk("LTE modem start  OK\n\n");
+
+	// init AT CMD parser
+	b = modem_info_init();
+
+	if (b != OK)
+	{
+		led_set_rgb(&led.sense, 1, 0, 1);
+		printk("\n\tLTE modem AT CMD parser failed to start: %d\n\n", -b);
+
+		return FAIL;
+	}
+
+	// init the modem information structure
+	b = modem_info_params_init(&modem_param);
+
+	if (b != OK)
+	{
+		led_set_rgb(&led.sense, 1, 1, 0);
+		printk("\n\tLTE modem_param is NULL: %d\n\n", -b);
+
+		return FAIL;
+	}
+
+	// LTE link ready
+	led_set_rgb(&led.sense, 0, 0, 0);
+	printk("LTE link ready\n");
+
+	return OK;
+}
+
+void tcp_connect_thread(void)
+{
+	while (true)
+	{
+		// WAIT
+		k_sem_take(&sem_tcp_connect, K_FOREVER);
+
+		// a request to connect or disconnect the TCP socket has arrived
+		led_set_rgb(&led.sense, 0, 0, 0);
+
+		if (btn_0_trigger)
+		{
+			// toggle TCP connection
+			lte_enabled = !lte_enabled;
+			btn_0_trigger = 0;
+		}
+
+		if (!lte_ready && lte_enabled)
+		{
+			lte_ready = (OK == init_lte());
+
+			if (!lte_ready)
+			{
+				continue;
+			}
+		}
+
+		if (so == FAIL)
+		{
+			if (lte_enabled)
+			{
+				so = tcp_connect();
+			}
+
+			if (so == FAIL)
+			{
+				if (btn_0_trigger)
+				{
+					// btn_0 triggered while waiting for tcp_connect()
+					led_set_rgb(&led.main, 0, 0, 0);
+				}
+			}
+		}
+		else if (!lte_enabled)
+		{
+			shutdown(so, SHUT_RDWR);
+			close(so);
+			so = FAIL;
+			led_set_rgb(&led.main, 0, 0, 0);
+			printk("TCP log disabled\n\n");
+		}
+	}
+}
+
+K_THREAD_DEFINE(tcp_connect_thread_id, 8192, tcp_connect_thread, NULL, NULL, NULL, 7, 0, 0);
+#endif
+
+ssize_t lte_send(const char * msg, size_t size)
+{
+#if CONFIG_NETWORKING
+	if (!msg || !size || !lte_enabled)
+	{
+		return FAIL;
+	}
+
+	if (so == FAIL)
+	{
+		// try to reconnect
+		k_sem_give(&sem_tcp_connect);
+
+		return FAIL;
+	}
+
+	ssize_t bytes_sent = send(so, msg, size, 0);
+
+	if (bytes_sent <= 0)
+	{
+		close(so);
+		so = FAIL;
+		led_set_rgb(&led.main, 1, 1, 0);
+		printk("send failed\n\n");
+
+		return FAIL;
+	}
+
+	return bytes_sent;
+#else
+	return FAIL;
+#endif
+}
+
+
+#define MSG_SIZE 256
+
+#define ENABLE_UART_OUT 1
+#define ENABLE_ADXL362  1
+#define ENABLE_ADXL372  1
+#define ENABLE_BH1479   1
+#define ENABLE_BME680   1
+
+#define ADXL372_SKIP    4
+#define BME680_SKIP    32
+
+//#undef CONFIG_ADXL372_PEAK_DETECT_MODE
+#define BH1479_THRESHOLD_UPPER          50
+#define BH1479_THRESHOLD_LOWER          0
+#define BH1479_TRIGGER_ON_DATA_READY    1
+
+
+K_SEM_DEFINE(adxl362_sem, 0, 1);
+K_SEM_DEFINE(adxl372_sem, 0, 1);
+K_SEM_DEFINE(bh1479_sem, 0, 1);
+
+
+
+#if ENABLE_ADXL362
+// ADXL362
+static void trigger_handler_adxl362(const struct device * dev, struct sensor_trigger * trig)
+{
+	switch (trig->type)
+	{
+	case SENSOR_TRIG_DATA_READY:
+		if (sensor_sample_fetch(dev) < 0)
+		{
+			printf("ADXL362  Sample fetch error\n");
+			return;
+		}
+
+		k_sem_give(&adxl362_sem);
+
+		break;
+
+	case SENSOR_TRIG_THRESHOLD:
+		printf("ADXL362  Threshold trigger\n");
+
+		break;
+
+	default:
+		printf("ADXL362  Unknown trigger\n");
+	}
+}
+#endif
+
+
+#if ENABLE_ADXL372
+// ADXL372
+static void trigger_handler_adxl372(const struct device * dev, struct sensor_trigger * trigger)
+{
+	ARG_UNUSED(trigger);
+
+	if (sensor_sample_fetch(dev))
+	{
+		printf("ADXL372  sensor_sample_fetch failed\n");
+		return;
+	}
+
+	k_sem_give(&adxl372_sem);
+}
+#endif
+
+
+#if ENABLE_BH1479
+// BH1479
+static void bh1479_trigger_handler(const struct device * dev, struct sensor_trigger * trigger)
+{
+#if 0
+	ARG_UNUSED(dev);
+
+	switch (trigger->type)
+	{
+	case SENSOR_TRIG_THRESHOLD:
+		printf("BH1479  Threshold trigger\r\n");
+		break;
+
+	case SENSOR_TRIG_DATA_READY:
+		printf("BH1479  Data ready trigger\r\n");
+		break;
+
+	default:
+		printf("BH1479  Unknown trigger event %d\r\n", trigger->type);
+		break;
+	}
+#endif
+
+
+	// The sensor does only support fetching SENSOR_CHAN_ALL
+	int ret = sensor_sample_fetch_chan(dev, SENSOR_CHAN_ALL);
+
+	if (ret)
+	{
+		printf("sensor_sample_fetch failed ret %d\n", ret);
+		return;
+	}
+
+	k_sem_give(&bh1479_sem);
+}
+
+static int bh1479_set_attribute(
+	const struct device * dev,
+	enum sensor_channel chan,
+	enum sensor_attribute attr,
+	int value
+)
+{
+	int ret;
+	struct sensor_value sensor_val;
+
+	sensor_val.val1 = (value);
+
+	ret = sensor_attr_set(dev, chan, attr, &sensor_val);
+
+	if (ret)
+	{
+		printf("BH1479  sensor_attr_set failed ret %d\n", ret);
+	}
+
+	return ret;
+}
+#endif
+
+
+void main(void)
+{
+	char msg[MSG_SIZE];
+	size_t size = 0;
+
+	// init button and LED
+	btn_init();
+	led_init();
+
+
+#if ENABLE_ADXL362
+	// ADXL362
+	const struct device * adxl362_dev = device_get_binding(DT_LABEL(DT_INST(0, adi_adxl362)));
+
+	if (adxl362_dev == NULL)
+	{
+		printf("ADXL362  Device get binding device\n");
+		return;
+	}
+
+	if (IS_ENABLED(CONFIG_ADXL362_TRIGGER))
+	{
+		struct sensor_trigger trig = { .chan = SENSOR_CHAN_ACCEL_XYZ };
+
+		trig.type = SENSOR_TRIG_THRESHOLD;
+
+		if (sensor_trigger_set(adxl362_dev, &trig, trigger_handler_adxl362))
+		{
+			printf("ADXL362  Trigger set error\n");
+			return;
+		}
+
+		trig.type = SENSOR_TRIG_DATA_READY;
+
+		if (sensor_trigger_set(adxl362_dev, &trig, trigger_handler_adxl362))
+		{
+			printf("ADXL362  Trigger set error\n");
+		}
+	}
+#endif
+
+
+#if ENABLE_ADXL372
+	// ADXL372
+	const struct device * adxl372_dev = device_get_binding(DT_LABEL(DT_INST(0, adi_adxl372)));
+
+	if (adxl372_dev == NULL)
+	{
+		printf("ADXL372  Could not get %s device\n", DT_LABEL(DT_INST(0, adi_adxl372)));
+		return;
+	}
+
+	struct sensor_trigger adxl372_trig =
+	{
+		.type = SENSOR_TRIG_DATA_READY,
+		.chan = SENSOR_CHAN_ACCEL_XYZ,
+	};
+
+	if (IS_ENABLED(CONFIG_ADXL372_PEAK_DETECT_MODE))
+	{
+		adxl372_trig.type = SENSOR_TRIG_THRESHOLD;
+	}
+
+	if (IS_ENABLED(CONFIG_ADXL372_TRIGGER))
+	{
+		if (sensor_trigger_set(adxl372_dev, &adxl372_trig, trigger_handler_adxl372))
+		{
+			printf("ADXL372  Could not set trigger\n");
+			return;
+		}
+	}
+#endif
+
+
+#if ENABLE_BH1479
+	// BH1479
+	const struct device * bh1479_dev;
+
+	if (IS_ENABLED(CONFIG_LOG_BACKEND_RTT))
+	{
+		// Give RTT log time to be flushed before executing tests
+		//-k_sleep(K_MSEC(500));
+	}
+
+	bh1479_dev = device_get_binding("BH1749");
+
+	if (bh1479_dev == NULL)
+	{
+		printf("BH1479  Failed to get device binding\n");
+		return;
+	}
+
+	printf("BH1479  device is %p, name is %s\n", bh1479_dev, bh1479_dev->name);
+
+	struct sensor_trigger sensor_trig_conf =
+	{
+#if (BH1479_TRIGGER_ON_DATA_READY)
+		.type = SENSOR_TRIG_DATA_READY,
+#else
+		.type = SENSOR_TRIG_THRESHOLD,
+#endif
+
+		.chan = SENSOR_CHAN_RED,
+	};
+
+	if (IS_ENABLED(CONFIG_BH1749_TRIGGER))
+	{
+		bh1479_set_attribute(
+			bh1479_dev,
+			SENSOR_CHAN_ALL,
+			SENSOR_ATTR_LOWER_THRESH,
+			BH1479_THRESHOLD_LOWER
+		);
+
+		bh1479_set_attribute(
+			bh1479_dev,
+			SENSOR_CHAN_ALL,
+			SENSOR_ATTR_UPPER_THRESH,
+			BH1479_THRESHOLD_UPPER
+		);
+
+		if (sensor_trigger_set(bh1479_dev, &sensor_trig_conf, bh1479_trigger_handler))
+		{
+			printf("BH1479  Could not set trigger\n");
+			return;
+		}
+	}
+
+#endif
+
+
+#if ENABLE_BME680
+	// BME680
+	const struct device * bme680_dev = device_get_binding(DT_LABEL(DT_INST(0, bosch_bme680)));
+
+	printf("BME680  Device %p name is %s\n", bme680_dev, bme680_dev->name);
+#endif
+
+
+	//
+	int i = 0;
+
+
+	while (true)
+	{
+		i++;
+
+#if ENABLE_ADXL362
+		// ADXL362
+		if (1)
+		{
+			if (IS_ENABLED(CONFIG_ADXL362_TRIGGER))
+			{
+				k_sem_take(&adxl362_sem, K_FOREVER);
+			}
+			else
+			{
+				k_sleep(K_MSEC(1000));
+
+				if (sensor_sample_fetch(adxl362_dev) < 0)
+				{
+					printf("ADXL372  Sample fetch error\n");
+					return;
+				}
+			}
+
+			struct sensor_value adxl362_accel[3];
+
+			if (sensor_channel_get(adxl362_dev, SENSOR_CHAN_ACCEL_X, &adxl362_accel[0]) < 0)
+			{
+				printf("ADXL372  Channel get error\n");
+				return;
+			}
+
+			if (sensor_channel_get(adxl362_dev, SENSOR_CHAN_ACCEL_Y, &adxl362_accel[1]) < 0)
+			{
+				printf("ADXL372  Channel get error\n");
+				return;
+			}
+
+			if (sensor_channel_get(adxl362_dev, SENSOR_CHAN_ACCEL_Z, &adxl362_accel[2]) < 0)
+			{
+				printf("ADXL372  Channel get error\n");
+				return;
+			}
+
+			size = snprintf(
+				msg,
+				sizeof(msg),
+				"adxl362={\"x\": %.1f, \"y\": %.1f, \"z\": %.1f}\n",
+				sensor_value_to_double(&adxl362_accel[0]),
+				sensor_value_to_double(&adxl362_accel[1]),
+				sensor_value_to_double(&adxl362_accel[2])
+			);
+
+#if ENABLE_UART_OUT
+			printf("%s", msg);
+#endif
+
+			lte_send(msg, size);
+		}
+#endif
+
+
+#if ENABLE_ADXL372
+		// ADXL372
+		if (!(i % ADXL372_SKIP))
+		{
+			if (sensor_sample_fetch(adxl372_dev))
+			{
+				printf("ADXL372  sensor_sample_fetch failed\n");
+			}
+
+			struct sensor_value adxl372_accel[3];
+			sensor_channel_get(adxl372_dev, SENSOR_CHAN_ACCEL_XYZ, adxl372_accel);
+
+			size = snprintf(
+				msg,
+				sizeof(msg),
+				"adxl372={\"x\": %.1f, \"y\": %.1f, \"z\": %.1f}\n",
+				sensor_value_to_double(&adxl372_accel[0]),
+				sensor_value_to_double(&adxl372_accel[1]),
+				sensor_value_to_double(&adxl372_accel[2])
+			);
+
+#if ENABLE_UART_OUT
+			printf("%s", msg);
+#endif
+
+			lte_send(msg, size);
+		}
+#endif
+
+
+#if ENABLE_BH1479
+		// BH1479
+		if (OK == k_sem_take(&bh1479_sem, K_NO_WAIT))
+		{
+			struct sensor_value bh1479_r;
+			struct sensor_value bh1479_g;
+			struct sensor_value bh1479_b;
+			struct sensor_value bh1479_i;
+
+			int ret_r = sensor_channel_get(bh1479_dev, SENSOR_CHAN_RED, &bh1479_r);
+			int ret_g = sensor_channel_get(bh1479_dev, SENSOR_CHAN_GREEN, &bh1479_g);
+			int ret_b = sensor_channel_get(bh1479_dev, SENSOR_CHAN_BLUE, &bh1479_b);
+			int ret_i = sensor_channel_get(bh1479_dev, SENSOR_CHAN_IR, &bh1479_i);
+
+			if (ret_r || ret_g || ret_b || ret_i)
+			{
+				printf(
+					"sensor_channel_get failed  r %d  g %d  b %d  i %d\n",
+					ret_r,
+					ret_g,
+					ret_b,
+					ret_i
+				);
+
+				return;
+			}
+
+			size = snprintf(
+				msg,
+				sizeof(msg),
+				"bh1479={\"r\": %d, \"g\": %d, \"b\": %d, \"i\": %d}\n",
+				bh1479_r.val1,
+				bh1479_g.val1,
+				bh1479_b.val1,
+				bh1479_i.val1
+			);
+
+#if ENABLE_UART_OUT
+			printf("%s", msg);
+#endif
+
+			lte_send(msg, size);
+		}
+#endif
+
+
+#if ENABLE_BME680
+		// BME680
+		if (!(i % BME680_SKIP))
+		{
+			//k_sleep(K_MSEC(3000));
+			struct sensor_value temp, press, humidity, gas_res;
+
+			sensor_sample_fetch(bme680_dev);
+			sensor_channel_get(bme680_dev, SENSOR_CHAN_AMBIENT_TEMP, &temp);
+			sensor_channel_get(bme680_dev, SENSOR_CHAN_PRESS, &press);
+			sensor_channel_get(bme680_dev, SENSOR_CHAN_HUMIDITY, &humidity);
+			sensor_channel_get(bme680_dev, SENSOR_CHAN_GAS_RES, &gas_res);
+
+			size = snprintf(
+				msg,
+				sizeof(msg),
+				"bme680={\"temp\": %d.%03d, \"pressure\": %d.%03d, \"humidity\": %d.%03d, \"gas\": %d}\n",
+				temp.val1, temp.val2 / 1000,
+				press.val1, press.val2 / 1000,
+				humidity.val1, humidity.val2 / 1000,
+				gas_res.val1
+			);
+
+#if ENABLE_UART_OUT
+			printf("%s", msg);
+#endif
+
+			lte_send(msg, size);
+		}
+#endif
+	}
+}

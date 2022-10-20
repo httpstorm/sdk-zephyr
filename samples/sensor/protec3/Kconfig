@@ -1,0 +1,58 @@
+#
+# Copyright (c) 2018 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-BSD-5-Clause-Nordic
+#
+
+menu "Protec3"
+
+config APPLICATION_WORKQUEUE_STACK_SIZE
+	int "Application workqueue stack size"
+	default 4096
+
+config MESSAGE_BUFFER_SIZE
+	int "snprintf Buffer Size (by Mahouni)"
+	default 256
+
+config APPLICATION_WORKQUEUE_PRIORITY
+	int "Application workqueue priority"
+	default SYSTEM_WORKQUEUE_PRIORITY
+
+config ASSET_TRACKER_WATCHDOG_TIMEOUT_MSEC
+	int "Watchdog timeout in milliseconds"
+	default 10000
+
+config USE_AT_HOST
+	bool "Enable AT commands"
+	default y
+	select AT_HOST_LIBRARY
+	help
+	  Enable the AT host library so that AT commands can be sent to and
+	  received from a serial terminal.
+
+config UPDATE_HOST
+	string "Download host name"
+	default "euros-embedded.s3.eu-central-1.amazonaws.com"
+
+config UPDATE_FILE
+	string "The file to download"
+	default "app_update.bin"
+
+config UPDATE_VERSION
+	int "Application version"
+	default 1
+
+config UPDATE_USE_HTTPS
+	bool
+	prompt "Use HTTPS for download"
+	default n
+
+endmenu
+
+menu "Zephyr Kernel"
+source "Kconfig.zephyr"
+endmenu
+
+module = PROTEC3
+module-str = Protec3
+source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"

@@ -1,0 +1,47 @@
+#
+# Copyright (c) 2018 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-BSD-5-Clause-Nordic
+#
+
+menu "MQTT protec3 PoC"
+
+config MQTT_BROKER_HOSTNAME
+	string "MQTT broker hostname"
+	default "protec3.io"
+
+config MQTT_BROKER_PORT
+	int "MQTT broker port"
+	default 5883
+
+config MQTT_CLIENT_USERNAME
+	string "MQTT client username"
+	default ""
+
+config MQTT_CLIENT_PASSWORD
+	string "MQTT client password"
+	default ""
+
+config MQTT_MESSAGE_BUFFER_SIZE
+	int "MQTT message buffer size"
+	default 256
+
+config MQTT_PAYLOAD_BUFFER_SIZE
+	int "MQTT payload buffer size"
+	default 256
+
+config SEC_TAG
+    int "Security tag to use for the connection"
+    default 13496857
+
+config PEER_VERIFY
+    int "Peer verify parameter for mqtt_client"
+    default 2
+    help
+        Set to 0 for VERIFY_NONE, 1 for VERIFY_OPTIONAL, and 2 for VERIFY_REQUIRED.
+
+endmenu
+
+menu "Zephyr Kernel"
+source "$ZEPHYR_BASE/Kconfig.zephyr"
+endmenu
