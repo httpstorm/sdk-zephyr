@@ -1,0 +1,9 @@
+sample:
+  name: thingy91 Sensor sample
+tests:
+  sample.sensor.thingy91:
+    harness: sensor
+    tags: samples sensor
+    platform_allow: thingy91_nrf9160_ns
+    platform_whitelist: thingy91_nrf9160_ns
+    depends_on: spi adxl362
