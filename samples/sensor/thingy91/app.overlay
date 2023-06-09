@@ -1,0 +1,11 @@
+/*
+ * Copyright (c) 2020, Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&adxl372 {
+	bw = <4>;
+	hpf = <0>;
+	odr = <4>;
+};
